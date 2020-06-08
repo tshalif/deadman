@@ -175,9 +175,11 @@ static int read_pid(const char *str)
   char *simple_strtol_term = 0;
   int retval = 0;
 
-  down(&deadman_mutex);
+  if (myprecious != -1) {
+    printk("DEADMAN: my precious is already set to %d\n", myprecious);
+  } else {
+    down(&deadman_mutex);
 
-  if (-1 == myprecious) {
     myprecious = simple_strtol(str, &simple_strtol_term, 10);
 
     if (simple_strtol_term == str || (*simple_strtol_term != '\0' && *simple_strtol_term != '\n')) { /* integer parse error */
@@ -187,10 +189,10 @@ static int read_pid(const char *str)
     }
 
     retval = -1 != myprecious;
+
+    up(&deadman_mutex);
   }
-
-  up(&deadman_mutex);
-
+  
   return retval;
 }
 /**
