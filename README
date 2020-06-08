@@ -1,0 +1,38 @@
+Deadman Linux module:
+--------------------
+
+The Linux kernel deadman.o module enables
+registring arbitrary process PID for 'livlihood'
+monitoring. That is, if the process dies, killed or stopped by
+the user, deadman would normally reboot the machine.
+
+Process Registring for monitring:
+--------------------------------
+
+Registring processes is done via the
+/proc/deadman file
+
+Example:
+
+echo 514 > /proc/deadman
+
+Checking deadman status:
+-----------------------
+
+This can be done via the /proc/deadman info file
+
+Example:
+
+cat /proc/deadman
+
+
+
+Module Parameters:
+-----------------
+
+  margin: how many seconds to wait between each pid status check (default 60)
+nowayout: once a process is registrered, the module can not be
+	  unloaded - i.e. deadman can not be stop (default true) 
+  noboot: don't boot even if pid is lost - use this for testing
+	  (default false)
+
