@@ -144,8 +144,9 @@ static void intrpt_routine(struct work_struct *irrelevant)
   /* 
    * If cleanup wants us to die
    */
-  if (die == 0)
+  if (die == 0) {
     queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * 1000));
+  }
 }
 
 
