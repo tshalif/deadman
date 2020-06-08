@@ -164,7 +164,7 @@ procfile_read(struct file *file, char *buffer,
     /* we have finished to read, return 0 */
     ret  = 0;
   } else {
-    ret = sprintf(buffer, "nowayout=%d, noboot=%d, loopsleep=%d, reboot_delay=%d, myprecious=%d\n", nowayout, noboot, loopsleep, reboot_delay, myprecious);
+    ret = snprintf(buffer, buffer_length, "nowayout=%d, noboot=%d, loopsleep=%d, reboot_delay=%d, myprecious=%d\n", nowayout, noboot, loopsleep, reboot_delay, myprecious);
     *offset += ret;
   }
   return ret;
