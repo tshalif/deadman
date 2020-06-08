@@ -192,7 +192,7 @@ static int read_pid(const char *str)
 
     up(&deadman_mutex);
   }
-
+  
   return retval;
 }
 /**
@@ -229,12 +229,12 @@ static struct task_struct * deadman_find_pid(int pid)
 {
   struct task_struct *p, *res = 0;
 
-  extern rwlock_t tasklist_lock __attribute__((weak));
+  // extern rwlock_t tasklist_lock __attribute__((weak));
 
 
-  printk(KERN_INFO "deadman_find_pid: rasklist_lock >>\n");
+  // printk(KERN_INFO "deadman_find_pid: rasklist_lock >>\n");
 
-  read_lock(&tasklist_lock);
+  // read_lock(&tasklist_lock);
 
   for_each_process(p)
   {
@@ -244,9 +244,9 @@ static struct task_struct * deadman_find_pid(int pid)
     }
   }    
 
-  read_unlock(&tasklist_lock);
+  // read_unlock(&tasklist_lock);
 	
-  printk(KERN_INFO "deadman_find_pid: rasklist_lock <<\n");
+  // printk(KERN_INFO "deadman_find_pid: rasklist_lock <<\n");
 
   return res;
 }
