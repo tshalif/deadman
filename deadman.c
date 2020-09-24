@@ -4,7 +4,6 @@
 #include <linux/sched/signal.h> /* for_each_process */
 #include <linux/sched.h>	/* We need to put ourselves to sleep and wake up later */
 #include <linux/uaccess.h>
-// #include <asm/uaccess.h>	/* for copy_from_user */
 #include <linux/workqueue.h>	/* We scheduale tasks here */				   
 #include <linux/init.h>		/* For __init and __exit */
 #include <linux/interrupt.h>	/* For irqreturn_t */
