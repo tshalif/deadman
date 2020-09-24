@@ -7,3 +7,5 @@
 /Module.symvers
 /modules.order
 /.vscode
+/deadman.mod.c
+/.tmp_versions
