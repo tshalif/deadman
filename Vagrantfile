@@ -15,7 +15,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   # please see the online documentation at vagrantup.com.
 
   # Every Vagrant virtual environment requires a box to build off of.
-  config.vm.box = "hashicorp/bionic64"
+  config.vm.box = "Joormatt/ubuntu-20.04-desktop"
+#  config.vm.box = "ubuntu/focal64"
 
   config.vm.provision "shell", inline: $script
   
