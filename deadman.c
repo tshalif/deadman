@@ -8,8 +8,8 @@
 #include <linux/init.h>		/* For __init and __exit */
 #include <linux/interrupt.h>	/* For irqreturn_t */
 #include <linux/reboot.h>
-#include <linux/semaphore.h>
-
+#include <linux/mutex.h>
+#include <linux/seq_file.h>
 
 /* 
  * some work_queue related functions
@@ -52,7 +52,7 @@ static struct proc_dir_entry *deadman_proc_file;
 #define MY_WORK_QUEUE_NAME "WQdeadman.c"
 
 
-static DEFINE_SEMAPHORE(deadman_mutex);
+static DEFINE_MUTEX(deadman_mutex);
 
 static int myprecious = -1;
 
@@ -149,24 +149,18 @@ static void intrpt_routine(struct work_struct *irrelevant)
 }
 
 
-/** 
- * This function is called then the /proc file is read
- *
- */
-static ssize_t 
-procfile_read(struct file *file, char *buffer,
-	      size_t buffer_length, loff_t *offset)
+static int deadman_proc_show_info(struct seq_file *seq, void *v)
 {
-  int ret;
-	
-  if (*offset) {
-    /* we have finished to read, return 0 */
-    ret  = 0;
-  } else {
-    ret = snprintf(buffer, buffer_length, "nowayout=%d, noboot=%d, loopsleep=%d, reboot_delay=%d, myprecious=%d\n", nowayout, noboot, loopsleep, reboot_delay, myprecious);
-    *offset += ret;
-  }
-  return ret;
+    if (mutex_lock_interruptible(&deadman_mutex))
+        return -ERESTARTSYS;
+    seq_printf(seq, "nowayout=%d, noboot=%d, loopsleep=%d, reboot_delay=%d, myprecious=%d\n", nowayout, noboot, loopsleep, reboot_delay, myprecious);
+    mutex_unlock(&deadman_mutex);
+    return 0;
+}
+
+static int deadman_proc_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, deadman_proc_show_info, NULL);
 }
 
 static int read_pid(const char *str) 
@@ -177,7 +171,8 @@ static int read_pid(const char *str)
   if (myprecious != -1) {
     printk("DEADMAN: my precious is already set to %d\n", myprecious);
   } else {
-    down(&deadman_mutex);
+    mutex_lock(&deadman_mutex);
+
 
     myprecious = simple_strtol(str, &simple_strtol_term, 10);
 
@@ -189,7 +184,7 @@ static int read_pid(const char *str)
 
     retval = -1 != myprecious;
 
-    up(&deadman_mutex);
+    mutex_unlock(&deadman_mutex);
   }
   
   return retval;
@@ -251,10 +246,12 @@ static struct task_struct * deadman_find_pid(int pid)
 }
 
 
-static const struct file_operations proc_file_fops = {
-  .owner = THIS_MODULE,
-  .read  = procfile_read,
-  .write = procfile_write,
+static const struct proc_ops proc_ops = {
+  .proc_open = deadman_proc_open,
+  .proc_read  = seq_read,
+  .proc_write = procfile_write,
+  .proc_lseek = seq_lseek,
+  .proc_release = single_release
 };
   
 /**
@@ -265,7 +262,7 @@ int __init init_module()
 {
 
   /* create the /proc file */
-  deadman_proc_file = proc_create(PROCFS_NAME, 0644, NULL, &proc_file_fops);
+  deadman_proc_file = proc_create(PROCFS_NAME, 0644, NULL, &proc_ops);
 	
   if (deadman_proc_file == NULL) {
     printk(KERN_ALERT "Error: Could not initialize /proc/%s\n",
