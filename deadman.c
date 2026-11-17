@@ -1,4 +1,7 @@
+#define pr_fmt(fmt) "DEADMAN: " fmt
+
 #include <linux/module.h>	/* Specifically, a module */
+#include <linux/version.h>
 #include <linux/kernel.h>	/* We're doing kernel work */
 #include <linux/proc_fs.h>	/* Necessary because we use the proc fs */
 #include <linux/sched/signal.h> /* for_each_process */
@@ -6,7 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>	/* We scheduale tasks here */				   
 #include <linux/init.h>		/* For __init and __exit */
-#include <linux/interrupt.h>	/* For irqreturn_t */
+#include <linux/rcupdate.h>	/* rcu_read_lock */
 #include <linux/reboot.h>
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
@@ -17,6 +20,7 @@
  */
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Tal Shalif");
+MODULE_DESCRIPTION("Reboot the machine when a registered process dies or is stopped");
 /*
   Based on examples from The 'Linux Kernel Module Programming Guide'
   at http://www.tldp.org/LDP/lkmpg/2.6/html/index.html
@@ -29,13 +33,13 @@ MODULE_AUTHOR("Tal Shalif");
 static int loopsleep = 30;	/* in seconds */
 static int noboot = 0;
 static int nowayout = 1;
-static bool man_is_dead = false;
+static bool man_is_dead;
 static int reboot_delay = 180;  /* delay reboot by enough time to exit a desktop session */
 
 module_param(nowayout,int, 0444);
 MODULE_PARM_DESC(nowayout, "Deadman cannot be stopped once started (default=true)");
 module_param(loopsleep,int, 0444);
-MODULE_PARM_DESC(loopsleep, "Deadman check is triggered every x seconds (default=60)");
+MODULE_PARM_DESC(loopsleep, "Deadman check is triggered every x seconds (default=30)");
 module_param(noboot,int, 0444);
 MODULE_PARM_DESC(noboot, "Deadman will not reboot the machine (default=false)");
 
@@ -43,7 +47,7 @@ module_param(reboot_delay,int, 0444);
 MODULE_PARM_DESC(reboot_delay, "Deadman will delay reboot by that many seconds - enough time for example to exit a desktop session (default=180)");
 
 
-/**
+/*
  * This structure hold information about the /proc file
  *
  */
@@ -58,94 +62,100 @@ static int myprecious = -1;
 
 static void intrpt_routine(struct work_struct *);
 
-static int die = 0;		/* set this to 1 for shutdown */
+static int die;			/* set this to 1 for shutdown */
+static int reboot_remaining;	/* seconds left before delayed reboot */
 
 /* 
  * The work queue structure for this task, from workqueue.h 
  */
 static struct workqueue_struct *my_workqueue;
 
-//static struct work_struct Task;
 static DECLARE_DELAYED_WORK(Task, intrpt_routine);
-
-
-static struct task_struct * deadman_find_pid(int pid);
 
 
 static void deadman_reboot(void)
 {
-  printk(KERN_CRIT "DEADMAN: Initiating system reboot.\n");
+  pr_crit("Initiating system reboot.\n");
 #ifdef HAS_MACHINE_RESTART
   machine_restart(NULL);
 #else
   emergency_restart();
 #endif
-  printk("DEADMAN: Reboot didn't ?????\n");
+  pr_crit("Reboot did not happen\n");
 }
 
+/*
+ * Task state moved from ->state to ->__state in Linux 5.14.
+ */
+static inline unsigned int deadman_task_state(struct task_struct *p)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+  return READ_ONCE(p->__state);
+#else
+  return READ_ONCE(p->state);
+#endif
+}
 
-/* 
- * This function will be called on every timer interrupt. Notice the void*
- * pointer - task functions can be used for more than one purpose, each time
- * getting a different parameter.
+/*
+ * Returns true if the process with the given (init namespace) pid is gone,
+ * stopped, a zombie or dead.  The task list is walked and the task inspected
+ * under rcu_read_lock() so the task_struct cannot be freed underneath us.
+ */
+static bool deadman_pid_is_dead(int pid)
+{
+  struct task_struct *p;
+  bool dead = true;
+
+  rcu_read_lock();
+  for_each_process(p) {
+    if (p->pid == pid) {
+      /* zombie/dead are reported in exit_state, stopped in state */
+      dead = (READ_ONCE(p->exit_state) & (EXIT_ZOMBIE | EXIT_DEAD)) ||
+             (deadman_task_state(p) & (__TASK_STOPPED | TASK_DEAD));
+      break;
+    }
+  }
+  rcu_read_unlock();
+
+  if (dead)
+    pr_crit("my precious pid %d is gone, a zombie, stopped or dead!\n", pid);
+  else
+    pr_info("found my precious %d\n", pid);
+
+  return dead;
+}
+
+/*
+ * Periodic check, runs from the work queue every loopsleep seconds.
  */
 static void intrpt_routine(struct work_struct *irrelevant)
 {
+  int pid;
 
-  int pid = myprecious;
-  struct task_struct *res = 0;
+  mutex_lock(&deadman_mutex);
+  pid = myprecious;
+  mutex_unlock(&deadman_mutex);
 
-  res = deadman_find_pid(pid);
-
-  if (!res) {
-    printk(KERN_INFO "my precious pid %d not found\n", pid);
+  if (pid > 0 && deadman_pid_is_dead(pid))
     man_is_dead = true;
-  } else {
-    switch (res->state) {
-    case -1:
-    case TASK_STOPPED:
-    case EXIT_ZOMBIE:
-    case EXIT_DEAD:
-    case TASK_DEAD:
-      printk(KERN_CRIT "DEADMAN: my precious pid %d is a zomby, stopped or dead!\n", res->pid);
-
-      man_is_dead = true;
-
-      break;
-    default:
-      printk(KERN_INFO "DEADMAN: found my precious %d\n", pid);
-      break;
-    }
-
-  }
-
 
   if (man_is_dead) {
     if (noboot) {
-      printk(KERN_CRIT "DEADMAN: Triggered - Reboot ignored.\n");
-    }
-    else {
-      if (reboot_delay <= 0) {
-        deadman_reboot();
-      } else {
-
-        {
-          int reboot_time = reboot_delay <= 0 ? loopsleep : reboot_delay;
-          printk(KERN_CRIT "DEADMAN: delayed reboot - will reboot in about %d seconds.\n", reboot_time);
-        }
-
-        reboot_delay -= loopsleep;
-
-      }
+      pr_crit("Triggered - Reboot ignored.\n");
+    } else if (reboot_remaining <= 0) {
+      deadman_reboot();
+    } else {
+      pr_crit("delayed reboot - will reboot in about %d seconds.\n",
+              reboot_remaining);
+      reboot_remaining -= loopsleep;
     }
   }
 
-  /* 
-   * If cleanup wants us to die
+  /*
+   * If cleanup wants us to die, do not re-queue
    */
-  if (die == 0) {
-    queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * 1000));
-  }
+  if (!READ_ONCE(die))
+    queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * MSEC_PER_SEC));
 }
 
 
@@ -163,86 +173,66 @@ static int deadman_proc_open(struct inode *inode, struct file *file)
     return single_open(file, deadman_proc_show_info, NULL);
 }
 
-static int read_pid(const char *str) 
+/*
+ * Register the pid to watch.  Returns 0 on success or a negative errno.
+ */
+static int read_pid(const char *str)
 {
-  char *simple_strtol_term = 0;
-  int retval = 0;
+  int pid, ret;
+
+  ret = kstrtoint(strim((char *)str), 10, &pid);
+  if (ret) {
+    pr_warn("input not an integer ('%s')\n", str);
+    return ret;
+  }
+  if (pid <= 0) {
+    pr_warn("invalid pid %d\n", pid);
+    return -EINVAL;
+  }
+
+  if (mutex_lock_interruptible(&deadman_mutex))
+    return -ERESTARTSYS;
 
   if (myprecious != -1) {
-    printk("DEADMAN: my precious is already set to %d\n", myprecious);
+    pr_info("my precious is already set to %d\n", myprecious);
+    ret = -EBUSY;
   } else {
-    mutex_lock(&deadman_mutex);
-
-
-    myprecious = simple_strtol(str, &simple_strtol_term, 10);
-
-    if (simple_strtol_term == str || (*simple_strtol_term != '\0' && *simple_strtol_term != '\n')) { /* integer parse error */
-      printk("DEADMAN: input not an integer ('%s')\n", str);
-      
-      myprecious = -1;
-    }
-
-    retval = -1 != myprecious;
-
-    mutex_unlock(&deadman_mutex);
+    myprecious = pid;
+    reboot_remaining = reboot_delay;
+    ret = 0;
   }
-  
-  return retval;
+
+  mutex_unlock(&deadman_mutex);
+  return ret;
 }
-/**
+
+/*
  * This function is called with the /proc file is written
  *
  */
-static ssize_t procfile_write(struct file *file, const char *buffer, size_t count,
-		   loff_t *data)
+static ssize_t procfile_write(struct file *file, const char __user *buffer,
+                              size_t count, loff_t *data)
 {
   char read_buff[PROCFS_MAX_SIZE + 1];
+  int ret;
 
-  if (count > PROCFS_MAX_SIZE ) {
-    printk(KERN_WARNING "deadman write size %ld exceeds max\n", count);
-    return -EFAULT;
+  if (count > PROCFS_MAX_SIZE) {
+    pr_warn("write size %zu exceeds max\n", count);
+    return -EINVAL;
   }
-  
-  /* write data to the buffer */
-  if ( copy_from_user(read_buff, buffer, count) ) {
+
+  if (copy_from_user(read_buff, buffer, count))
     return -EFAULT;
-  }
-		
+
   read_buff[count] = '\0';
 
-  if (read_pid(read_buff)) {
-    queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * 1000));
-  }
+  ret = read_pid(read_buff);
+  if (ret)
+    return ret;
 
+  queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * MSEC_PER_SEC));
 
   return count;
-}
-
-
-static struct task_struct * deadman_find_pid(int pid)
-{
-  struct task_struct *p, *res = 0;
-
-  // extern rwlock_t tasklist_lock __attribute__((weak));
-
-
-  // printk(KERN_INFO "deadman_find_pid: rasklist_lock >>\n");
-
-  // read_lock(&tasklist_lock);
-
-  for_each_process(p)
-  {
-    if (p->pid == pid) {
-      res = p;
-      break;
-    }
-  }    
-
-  // read_unlock(&tasklist_lock);
-	
-  // printk(KERN_INFO "deadman_find_pid: rasklist_lock <<\n");
-
-  return res;
 }
 
 
@@ -254,63 +244,61 @@ static const struct proc_ops proc_ops = {
   .proc_release = single_release
 };
   
-/**
+/*
  *This function is called when the module is loaded
  *
  */
-int __init init_module()
+static int __init deadman_init(void)
 {
+  if (loopsleep <= 0) {
+    pr_err("loopsleep must be positive (got %d)\n", loopsleep);
+    return -EINVAL;
+  }
+
+  my_workqueue = create_singlethread_workqueue(MY_WORK_QUEUE_NAME);
+  if (!my_workqueue)
+    return -ENOMEM;
 
   /* create the /proc file */
   deadman_proc_file = proc_create(PROCFS_NAME, 0644, NULL, &proc_ops);
-	
+
   if (deadman_proc_file == NULL) {
-    printk(KERN_ALERT "Error: Could not initialize /proc/%s\n",
-           PROCFS_NAME);
+    pr_alert("Could not initialize /proc/%s\n", PROCFS_NAME);
+    destroy_workqueue(my_workqueue);
     return -ENOMEM;
   }
 
-
-  /* 
-   * Put the task in the work_timer task queue, so it will be executed at
-   * next timer interrupt
-   */
-  my_workqueue = create_workqueue(MY_WORK_QUEUE_NAME);
-	
-  printk(KERN_INFO "/proc/%s created\n", PROCFS_NAME);	
+  pr_info("/proc/%s created\n", PROCFS_NAME);
   return 0;	/* everything is ok */
 }
 
-/**
+/*
  *This function is called when the module is unloaded
  *
  */
-void __exit cleanup_module()
+static void __exit deadman_exit(void)
 {
+  bool registered;
 
-  if (nowayout && !noboot) {
-    printk(KERN_WARNING "Deadman cannot be stopped!\nI take the machine down with me..");
+  mutex_lock(&deadman_mutex);
+  registered = myprecious != -1;
+  mutex_unlock(&deadman_mutex);
+
+  /* Only a registered deadman has anything to guard. */
+  if (registered && nowayout && !noboot) {
+    pr_warn("Deadman cannot be stopped! I take the machine down with me..\n");
     deadman_reboot();
   }
-    
+
   remove_proc_entry(PROCFS_NAME, NULL);
 
-
-  die = 1;		/* keep intrp_routine from queueing itself */
-  cancel_delayed_work(&Task);	/* no "new ones" */
+  WRITE_ONCE(die, 1);		/* keep intrpt_routine from queueing itself */
+  cancel_delayed_work_sync(&Task);	/* no "new ones", wait for a running one */
   flush_workqueue(my_workqueue);	/* wait till all "old ones" finished */
   destroy_workqueue(my_workqueue);
 
-  /* 
-   * Sleep until intrpt_routine is called one last time. This is 
-   * necessary, because otherwise we'll deallocate the memory holding 
-   * intrpt_routine and Task while work_timer still references them.
-   * Notice that here we don't allow signals to interrupt us.
-   *
-   * Since WaitQ is now not NULL, this automatically tells the interrupt
-   * routine it's time to die.
-   */
-
-  printk(KERN_INFO "/proc/%s removed\n", PROCFS_NAME);
+  pr_info("/proc/%s removed\n", PROCFS_NAME);
 }
 
+module_init(deadman_init);
+module_exit(deadman_exit);
