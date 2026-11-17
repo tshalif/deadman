@@ -17,10 +17,11 @@ export BREAKTIME=4
 
 ## Process Registering for monitoring:
 
-Registering processes is done via the `/proc/deadman` file:
+Registering processes is done via the `/proc/deadman` file (up to 32 PIDs can be registered across multiple writes or separated by spaces/commas in a single write; if any registered process dies or is stopped, deadman triggers):
 
 ```bash
 echo 514 | sudo tee /proc/deadman
+echo 515 | sudo tee /proc/deadman
 ```
 
 ## Checking deadman status:
