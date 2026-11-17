@@ -1,4 +1,4 @@
-#! /bin/bash
+#!/bin/bash
 
 set -e
 
@@ -7,18 +7,18 @@ test "$DISPLAY" = ":0" || {
     exit 1
 }
 
-activity_log_arg=
+activity_log_args=()
 
-if xwrits --help | grep activity-log >& /dev/null; then
-    activity_log_arg="--activity-log $HOME/.xwrits_activity"
+if xwrits --help 2>&1 | grep -q activity-log; then
+    activity_log_args=(--activity-log "$HOME/.xwrits_activity")
 fi
 
-xwrits $activity_log_arg  typetime=${TYPETIME:-40} breaktime=${BREAKTIME:-4} +mouse  +breakclock +finger=german  +beep +clock after 5 multiply maxhands=6 after 5 flashtime=:0.4 after 1 maxhands=2000 &
+xwrits "${activity_log_args[@]}" typetime="${TYPETIME:-40}" breaktime="${BREAKTIME:-4}" +mouse  +breakclock +finger=german  +beep +clock after 5 multiply maxhands=6 after 5 flashtime=:0.4 after 1 maxhands=2000 &
 
 pid=$!
 
-sudo insmod $(dirname $(readlink -f $0))/deadman.ko || true
+sudo insmod "$(dirname "$(readlink -f "$0")")/deadman.ko" || true
 
-echo $pid | sudo tee /proc/deadman
+echo "$pid" | sudo tee /proc/deadman
 
 cat /proc/deadman
