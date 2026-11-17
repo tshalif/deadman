@@ -29,6 +29,7 @@ MODULE_DESCRIPTION("Reboot the machine when a registered process dies or is stop
 
 #define PROCFS_MAX_SIZE		512
 #define PROCFS_NAME 		"deadman"
+#define MAX_PRECIOUS_PIDS	32
 
 static int loopsleep = 30;	/* in seconds */
 static int noboot = 0;
@@ -58,7 +59,8 @@ static struct proc_dir_entry *deadman_proc_file;
 
 static DEFINE_MUTEX(deadman_mutex);
 
-static int myprecious = -1;
+static int myprecious[MAX_PRECIOUS_PIDS];
+static int num_precious;
 
 static void intrpt_routine(struct work_struct *);
 
@@ -130,14 +132,19 @@ static bool deadman_pid_is_dead(int pid)
  */
 static void intrpt_routine(struct work_struct *irrelevant)
 {
-  int pid;
+  int pids[MAX_PRECIOUS_PIDS];
+  int i, n;
 
   mutex_lock(&deadman_mutex);
-  pid = myprecious;
+  n = num_precious;
+  for (i = 0; i < n; i++)
+    pids[i] = myprecious[i];
   mutex_unlock(&deadman_mutex);
 
-  if (pid > 0 && deadman_pid_is_dead(pid))
-    man_is_dead = true;
+  for (i = 0; i < n; i++) {
+    if (deadman_pid_is_dead(pids[i]))
+      man_is_dead = true;
+  }
 
   if (man_is_dead) {
     if (noboot) {
@@ -161,9 +168,19 @@ static void intrpt_routine(struct work_struct *irrelevant)
 
 static int deadman_proc_show_info(struct seq_file *seq, void *v)
 {
+    int i;
+
     if (mutex_lock_interruptible(&deadman_mutex))
         return -ERESTARTSYS;
-    seq_printf(seq, "nowayout=%d, noboot=%d, loopsleep=%d, reboot_delay=%d, myprecious=%d\n", nowayout, noboot, loopsleep, reboot_delay, myprecious);
+    seq_printf(seq, "nowayout=%d, noboot=%d, loopsleep=%d, reboot_delay=%d, myprecious=",
+               nowayout, noboot, loopsleep, reboot_delay);
+    if (num_precious == 0) {
+        seq_puts(seq, "-1\n");
+    } else {
+        for (i = 0; i < num_precious; i++)
+            seq_printf(seq, "%s%d", i ? "," : "", myprecious[i]);
+        seq_putc(seq, '\n');
+    }
     mutex_unlock(&deadman_mutex);
     return 0;
 }
@@ -173,37 +190,96 @@ static int deadman_proc_open(struct inode *inode, struct file *file)
     return single_open(file, deadman_proc_show_info, NULL);
 }
 
-/*
- * Register the pid to watch.  Returns 0 on success or a negative errno.
- */
-static int read_pid(const char *str)
+static bool deadman_has_pid_locked(int pid)
 {
-  int pid, ret;
+  int i;
 
-  ret = kstrtoint(strim((char *)str), 10, &pid);
-  if (ret) {
-    pr_warn("input not an integer ('%s')\n", str);
-    return ret;
+  for (i = 0; i < num_precious; i++) {
+    if (myprecious[i] == pid)
+      return true;
   }
-  if (pid <= 0) {
-    pr_warn("invalid pid %d\n", pid);
+  return false;
+}
+
+/*
+ * Register one or more pids (whitespace- or comma-separated) to watch.
+ * Can be called multiple times to append additional pids up to
+ * MAX_PRECIOUS_PIDS.  Returns 0 on success or a negative errno.
+ */
+static int read_pids(char *str, bool *first_registration)
+{
+  int parsed[MAX_PRECIOUS_PIDS];
+  int nparsed = 0;
+  int new_count = 0;
+  char *cur = str;
+  char *tok;
+  int i, j, pid, ret;
+
+  while ((tok = strsep(&cur, " \t\n\r,")) != NULL) {
+    if (*tok == '\0')
+      continue;
+
+    ret = kstrtoint(tok, 10, &pid);
+    if (ret) {
+      pr_warn("input not an integer ('%s')\n", tok);
+      return ret;
+    }
+    if (pid <= 0) {
+      pr_warn("invalid pid %d\n", pid);
+      return -EINVAL;
+    }
+
+    /* Deduplicate within the same write buffer */
+    for (j = 0; j < nparsed; j++) {
+      if (parsed[j] == pid)
+        goto next_tok;
+    }
+
+    if (nparsed >= MAX_PRECIOUS_PIDS) {
+      pr_warn("too many pids (max %d)\n", MAX_PRECIOUS_PIDS);
+      return -ENOSPC;
+    }
+    parsed[nparsed++] = pid;
+next_tok:
+    ;
+  }
+
+  if (nparsed == 0) {
+    pr_warn("no pid provided\n");
     return -EINVAL;
   }
 
   if (mutex_lock_interruptible(&deadman_mutex))
     return -ERESTARTSYS;
 
-  if (myprecious != -1) {
-    pr_info("my precious is already set to %d\n", myprecious);
-    ret = -EBUSY;
-  } else {
-    myprecious = pid;
+  for (i = 0; i < nparsed; i++) {
+    if (!deadman_has_pid_locked(parsed[i]))
+      new_count++;
+  }
+
+  if (num_precious + new_count > MAX_PRECIOUS_PIDS) {
+    pr_warn("cannot register %d new pid(s); %d/%d slots already in use\n",
+            new_count, num_precious, MAX_PRECIOUS_PIDS);
+    mutex_unlock(&deadman_mutex);
+    return -ENOSPC;
+  }
+
+  *first_registration = (num_precious == 0 && new_count > 0);
+  if (*first_registration)
     reboot_remaining = reboot_delay;
-    ret = 0;
+
+  for (i = 0; i < nparsed; i++) {
+    if (deadman_has_pid_locked(parsed[i])) {
+      pr_info("pid %d is already registered\n", parsed[i]);
+    } else {
+      myprecious[num_precious++] = parsed[i];
+      pr_info("registered precious pid %d (%d total)\n",
+              parsed[i], num_precious);
+    }
   }
 
   mutex_unlock(&deadman_mutex);
-  return ret;
+  return 0;
 }
 
 /*
@@ -214,6 +290,7 @@ static ssize_t procfile_write(struct file *file, const char __user *buffer,
                               size_t count, loff_t *data)
 {
   char read_buff[PROCFS_MAX_SIZE + 1];
+  bool first_registration = false;
   int ret;
 
   if (count > PROCFS_MAX_SIZE) {
@@ -226,11 +303,12 @@ static ssize_t procfile_write(struct file *file, const char __user *buffer,
 
   read_buff[count] = '\0';
 
-  ret = read_pid(read_buff);
+  ret = read_pids(read_buff, &first_registration);
   if (ret)
     return ret;
 
-  queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * MSEC_PER_SEC));
+  if (first_registration)
+    queue_delayed_work(my_workqueue, &Task, msecs_to_jiffies(loopsleep * MSEC_PER_SEC));
 
   return count;
 }
@@ -281,7 +359,7 @@ static void __exit deadman_exit(void)
   bool registered;
 
   mutex_lock(&deadman_mutex);
-  registered = myprecious != -1;
+  registered = num_precious > 0;
   mutex_unlock(&deadman_mutex);
 
   /* Only a registered deadman has anything to guard. */
