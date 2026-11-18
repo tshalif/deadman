@@ -27,7 +27,9 @@ xwrits_pid=$!
 "$script_dir/wayland-xwrits-bridge" &
 bridge_pid=$!
 
-sudo insmod "$script_dir/deadman.ko" || true
+if [ ! -e /proc/deadman ]; then
+    sudo insmod "$script_dir/deadman.ko"
+fi
 
 echo "$xwrits_pid" | sudo tee /proc/deadman
 echo "$bridge_pid" | sudo tee /proc/deadman

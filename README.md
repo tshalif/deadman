@@ -9,11 +9,13 @@ Assuming you are using a Debian based Linux distribution, the following will ins
 
 ```bash
 sudo apt-get install -y xwrits build-essential libelf-dev linux-headers-`uname -r`
-make            # builds deadman.ko, wayland-xwrits-bridge, and libxwrits-sendevent.so
+make            # builds & signs deadman.ko, and builds wayland-xwrits-bridge and libxwrits-sendevent.so
 export TYPETIME=40
 export BREAKTIME=4
 ./xwrits-deadman.sh
 ```
+
+> **Secure Boot note:** `make` automatically signs `deadman.ko`. If your system already has an enrolled Ubuntu/Debian MOK key at `/var/lib/shim-signed/mok/MOK.der`, `make sign` will use it automatically (no reboot needed). Otherwise it generates `signing_key.priv` / `signing_key.x509`; with Secure Boot enabled, you must enroll the key once via `make enroll-key`, **reboot**, and select **Enroll MOK** in the blue UEFI MokManager prompt before the kernel will accept `insmod ./deadman.ko`.
 
 > **Wayland note:** On GNOME (Mutter) and KDE (ScreenSaver), `wayland-xwrits-bridge` queries idle time via the user's Session DBus with no extra permissions needed. On other Wayland compositors (e.g. Sway, Hyprland), add your user to the `input` group (`sudo usermod -aG input "$USER"`) so `wayland-xwrits-bridge` can monitor `/dev/input/event*` directly.
 
