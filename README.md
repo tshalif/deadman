@@ -5,15 +5,17 @@ Deadman is a Linux kernel module, which enables registering an arbitrary 'precio
 Linux kernel headers version 5.6 or higher is required to compile this module (builds cleanly against 6.12; the `task_struct` `state`/`__state` rename in 5.14 is handled).
 
 ## TL;DR
-Assuming you are using a Debian based Linux distribution, the following will install `xwrits` and the module build tools. Then it will run the [`xwrits-deadman.sh`](./xwrits-deadman.sh) wrapper, which will install the module and launch `xwrits` with 40 minutes of allowed typing/mouse activity and 4 minutes required break in between activity sessions:
+Assuming you are using a Debian based Linux distribution, the following will install `xwrits` and the module build tools. Then it will run the [`xwrits-deadman.sh`](./xwrits-deadman.sh) wrapper, which will install the module, launch `xwrits` (with `libxwrits-sendevent.so` preloaded) and the `wayland-xwrits-bridge` daemon so keyboard/mouse activity is tracked under Wayland as well as X11, and register both PIDs with `/proc/deadman`:
 
 ```bash
 sudo apt-get install -y xwrits build-essential libelf-dev linux-headers-`uname -r`
-make            # or: make KDIR=/path/to/kernel/build
+make            # builds deadman.ko, wayland-xwrits-bridge, and libxwrits-sendevent.so
 export TYPETIME=40
 export BREAKTIME=4
 ./xwrits-deadman.sh
 ```
+
+> **Wayland note:** On GNOME (Mutter) and KDE (ScreenSaver), `wayland-xwrits-bridge` queries idle time via the user's Session DBus with no extra permissions needed. On other Wayland compositors (e.g. Sway, Hyprland), add your user to the `input` group (`sudo usermod -aG input "$USER"`) so `wayland-xwrits-bridge` can monitor `/dev/input/event*` directly.
 
 ## Process Registering for monitoring:
 

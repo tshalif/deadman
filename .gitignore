@@ -10,3 +10,5 @@
 /deadman.mod.c
 /deadman.mod
 /.tmp_versions
+/wayland-xwrits-bridge
+/libxwrits-sendevent.so
