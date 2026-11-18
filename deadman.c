@@ -142,8 +142,10 @@ static void intrpt_routine(struct work_struct *irrelevant)
   mutex_unlock(&deadman_mutex);
 
   for (i = 0; i < n; i++) {
-    if (deadman_pid_is_dead(pids[i]))
+    if (deadman_pid_is_dead(pids[i])) {
       man_is_dead = true;
+      break;
+    }
   }
 
   if (man_is_dead) {
