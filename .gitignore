@@ -12,3 +12,5 @@
 /.tmp_versions
 /wayland-xwrits-bridge
 /libxwrits-sendevent.so
+/signing_key.priv
+/signing_key.x509
