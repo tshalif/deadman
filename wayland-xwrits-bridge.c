@@ -4,12 +4,14 @@
  * Under Wayland, xwrits runs inside XWayland and cannot see keyboard or
  * pointer activity in native Wayland windows.  This daemon monitors user
  * activity across Wayland via:
- *   1. Linux input devices (/dev/input/event*, /dev/input/mice) when readable
+ *   1. Linux input devices (/dev/input/event*, /dev/input/mice)
  *   2. GNOME / Mutter Session DBus (org.gnome.Mutter.IdleMonitor.GetIdletime)
  *   3. Freedesktop / KDE Session DBus (org.freedesktop.ScreenSaver.GetSessionIdleTime)
  *
- * Whenever activity is detected within a poll interval, it sends a synthetic
- * MotionNotify XEvent to xwrits's window on $DISPLAY.
+ * Whenever activity is detected within a poll interval, it:
+ *   - Updates /dev/shm/xwrits-wayland-activity-<uid> (read by the
+ *     XQueryPointer() hook in libxwrits-sendevent.so every 3s via A_MOUSE)
+ *   - Sends a synthetic MotionNotify XEvent to xwrits on $DISPLAY
  *
  * Uses dlopen() for libX11 and libgio/libglib so it compiles with only gcc/libc.
  */
@@ -60,6 +62,11 @@ union xw_xevent {
   long pad[24];
 };
 
+struct xw_shm_state {
+  uint64_t seq;
+  uint64_t monotonic_ms;
+};
+
 struct x11_api {
   void *handle;
   Display *(*XOpenDisplay)(const char *);
@@ -94,7 +101,7 @@ struct gio_api {
 };
 
 #define G_BUS_TYPE_SESSION 2
-#define MAX_INPUT_FDS      64
+#define MAX_INPUT_FDS      128
 #define RESCAN_INTERVAL_S  10
 
 static volatile sig_atomic_t stop_requested;
@@ -111,6 +118,26 @@ static int ignore_x_error(Display *dpy, void *err)
   (void)dpy;
   (void)err;
   return 0;
+}
+
+static uint64_t now_monotonic_ms(void)
+{
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    return 0;
+  return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000ULL);
+}
+
+static void update_shm_activity(int shm_fd, uint64_t *seq)
+{
+  struct xw_shm_state st;
+
+  if (shm_fd < 0)
+    return;
+  (*seq)++;
+  st.seq = *seq;
+  st.monotonic_ms = now_monotonic_ms();
+  (void)pwrite(shm_fd, &st, sizeof(st), 0);
 }
 
 static bool load_x11(struct x11_api *x)
@@ -244,6 +271,17 @@ static int open_input_devices(struct pollfd *pfds, int max_fds)
   return count;
 }
 
+static void drain_input_devices(struct pollfd *pfds, int count)
+{
+  char drain[512];
+  for (int i = 0; i < count; i++) {
+    if (pfds[i].fd >= 0) {
+      while (read(pfds[i].fd, drain, sizeof(drain)) > 0)
+        ;
+    }
+  }
+}
+
 static void close_input_devices(struct pollfd *pfds, int count)
 {
   for (int i = 0; i < count; i++) {
@@ -277,7 +315,8 @@ static Window find_xwrits_window(struct x11_api *x, Display *dpy, Window root,
                               &nitems, &bytes_after, &prop) == 0) {
       if (prop) {
         if (actual_format != 0 && nitems >= 1) {
-          long val = *(long *)prop;
+          /* XIDs are 32-bit unsigned values; avoid sign-extension from XA_INTEGER */
+          uint32_t val = (uint32_t)(*(unsigned long *)prop);
           found = (val != 0) ? (Window)val : children[i];
         }
         x->XFree(prop);
@@ -293,9 +332,12 @@ static Window find_xwrits_window(struct x11_api *x, Display *dpy, Window root,
 }
 
 static void notify_xwrits_activity(struct x11_api *x, Display *dpy, Window root,
-                                   Atom xwrits_atom, Window *cached_win)
+                                   Atom xwrits_atom, Window *cached_win,
+                                   int shm_fd, uint64_t *seq)
 {
   union xw_xevent ev;
+
+  update_shm_activity(shm_fd, seq);
 
   if (*cached_win == XW_NONE)
     *cached_win = find_xwrits_window(x, dpy, root, xwrits_atom);
@@ -315,11 +357,11 @@ static void notify_xwrits_activity(struct x11_api *x, Display *dpy, Window root,
         x->XSendEvent(dpy, *cached_win, 0, 0L, &ev);
       }
     }
-  } else {
-    ev.xmotion.window = root;
-    x->XSendEvent(dpy, root, 0,
-                  XW_KEY_PRESS_MASK | XW_SUBSTRUCTURE_NOTIFY_MASK, &ev);
   }
+
+  ev.xmotion.window = root;
+  x->XSendEvent(dpy, root, 0,
+                XW_KEY_PRESS_MASK | XW_SUBSTRUCTURE_NOTIFY_MASK, &ev);
   x->XFlush(dpy);
 }
 
@@ -345,6 +387,9 @@ int main(int argc, char **argv)
   time_t last_rescan = 0;
   uint64_t prev_mutter_idle = UINT64_MAX;
   uint64_t prev_fdo_idle = UINT64_MAX;
+  uint64_t shm_seq = 0;
+  char shm_path[128];
+  int shm_fd;
 
   for (int i = 1; i < argc; i++) {
     if ((strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interval") == 0) &&
@@ -377,6 +422,10 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  snprintf(shm_path, sizeof(shm_path), "/dev/shm/xwrits-wayland-activity-%u",
+           (unsigned int)getuid());
+  shm_fd = open(shm_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
   root = x11.XDefaultRootWindow(dpy);
   xwrits_atom = x11.XInternAtom(dpy, "XWRITS_WINDOW", 0);
   has_gio = load_gio(&gio);
@@ -384,11 +433,9 @@ int main(int argc, char **argv)
   nfds = open_input_devices(pfds, MAX_INPUT_FDS);
   last_rescan = time(NULL);
 
-  if (verbose) {
-    fprintf(stderr,
-            "wayland-xwrits-bridge: started (input_fds=%d, dbus=%s, interval=%dms)\n",
-            nfds, has_gio ? "yes" : "no", poll_ms);
-  }
+  fprintf(stderr,
+          "wayland-xwrits-bridge: monitoring %d /dev/input device(s), dbus=%s (interval=%dms)\n",
+          nfds, has_gio ? "connected" : "unavailable", poll_ms);
 
   while (!stop_requested) {
     bool active = false;
@@ -410,7 +457,7 @@ int main(int argc, char **argv)
               ;
             active = true;
           } else if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            last_rescan = 0; /* trigger rescan next iteration */
+            last_rescan = 0;
           }
         }
       }
@@ -426,7 +473,7 @@ int main(int argc, char **argv)
                              "org.gnome.Mutter.IdleMonitor",
                              "GetIdletime",
                              &idle_ms)) {
-        if (idle_ms < (uint64_t)poll_ms + 250 || idle_ms < prev_mutter_idle)
+        if (idle_ms < (uint64_t)poll_ms || idle_ms < prev_mutter_idle)
           active = true;
         prev_mutter_idle = idle_ms;
       } else if (query_dbus_idle_ms(&gio,
@@ -435,7 +482,7 @@ int main(int argc, char **argv)
                                     "org.freedesktop.ScreenSaver",
                                     "GetSessionIdleTime",
                                     &idle_ms)) {
-        if (idle_ms == 0 || idle_ms < prev_fdo_idle)
+        if (idle_ms < (uint64_t)poll_ms || idle_ms < prev_fdo_idle)
           active = true;
         prev_fdo_idle = idle_ms;
       }
@@ -444,10 +491,20 @@ int main(int argc, char **argv)
     if (active) {
       if (verbose)
         fprintf(stderr, "wayland-xwrits-bridge: activity detected, notifying xwrits\n");
-      notify_xwrits_activity(&x11, dpy, root, xwrits_atom, &cached_xwrits_win);
+      notify_xwrits_activity(&x11, dpy, root, xwrits_atom, &cached_xwrits_win,
+                             shm_fd, &shm_seq);
+      /* Rate-limit notifications to at most once per poll_ms */
+      if (nfds > 0) {
+        usleep((useconds_t)poll_ms * 1000U);
+        drain_input_devices(pfds, nfds);
+      }
     }
   }
 
+  if (shm_fd >= 0) {
+    close(shm_fd);
+    unlink(shm_path);
+  }
   close_input_devices(pfds, nfds);
   x11.XCloseDisplay(dpy);
   return 0;

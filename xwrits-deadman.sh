@@ -15,6 +15,15 @@ if xwrits --help 2>&1 | grep -q activity-log; then
     activity_log_args=(--activity-log "$HOME/.xwrits_activity")
 fi
 
+if [ ! -e /proc/deadman ]; then
+    sudo insmod "$script_dir/deadman.ko"
+fi
+
+# Grant read access on /dev/input devices so wayland-xwrits-bridge can poll
+# kernel keyboard/mouse events directly on any Wayland compositor.
+sudo setfacl -m "u:$(id -un):r" /dev/input/event* /dev/input/mice 2>/dev/null || \
+    sudo chmod a+r /dev/input/event* /dev/input/mice 2>/dev/null || true
+
 if [ -f "$script_dir/libxwrits-sendevent.so" ]; then
     LD_PRELOAD="$script_dir/libxwrits-sendevent.so${LD_PRELOAD:+:$LD_PRELOAD}" \
         xwrits "${activity_log_args[@]}" typetime="${TYPETIME:-40}" breaktime="${BREAKTIME:-4}" +mouse +breakclock +finger=german +beep +clock after 5 multiply maxhands=6 after 5 flashtime=:0.4 after 1 maxhands=2000 &
@@ -26,10 +35,6 @@ xwrits_pid=$!
 
 "$script_dir/wayland-xwrits-bridge" &
 bridge_pid=$!
-
-if [ ! -e /proc/deadman ]; then
-    sudo insmod "$script_dir/deadman.ko"
-fi
 
 echo "$xwrits_pid" | sudo tee /proc/deadman
 echo "$bridge_pid" | sudo tee /proc/deadman
